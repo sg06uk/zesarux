@@ -37,7 +37,9 @@ VO=(); [ "$HEADLESS" = 1 ] && VO=(--vo null --ao null)
 [ -f "$RUNNER" ] || { echo "runner not found: $RUNNER"; exit 1; }
 
 echo "Launching ZEsarUX (ZRCP port $PORT$([ "$HEADLESS" = 1 ] && echo ', headless')); demo=$DEMO"
-"$SRC/zesarux" --noconfigfile --nosplash --nowelcomemessage "${VO[@]}" \
+# skip every startup gate: splash, welcome, the first-start wizard, and first-aid popups
+"$SRC/zesarux" --noconfigfile --nosplash --nowelcomemessage \
+  --disable-first-start-wizard --disable-all-first-aid "${VO[@]}" \
   --enable-remoteprotocol --remoteprotocol-port "$PORT" </dev/null >"$LOG" 2>&1 &
 ZPID=$!
 cleanup() { kill "$ZPID" 2>/dev/null || true; }
