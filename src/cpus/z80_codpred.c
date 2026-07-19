@@ -2824,7 +2824,20 @@ void instruccion_ed_203 ()
 
 void instruccion_ed_204 ()
 {
-        invalid_opcode_ed("237 204");
+        // t80x ED CC: memset -- HL=dst, BC=count, A=value. Fill BC bytes with A;
+        // HL = one-past-last, BC = 0 (counter exhausted). count==0 -> no-op
+        // (NOT LDIR's 65536). Addresses wrap mod 65536.
+        z80_int dst = HL;
+        z80_int count = BC;
+        z80_byte val = reg_a;
+        z80_int i;
+        for (i = 0; i < count; i++) {
+                poke_byte(dst, val);
+                dst = (dst + 1) & 0xFFFF;
+        }
+        HL = dst;
+        BC = 0;
+        t_estados += 4;
 }
 
 void instruccion_ed_205 ()
