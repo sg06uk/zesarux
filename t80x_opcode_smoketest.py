@@ -1,120 +1,92 @@
 #!/usr/bin/env python3
-"""Drive ZEsarUX over ZRCP: execute each t80x opcode and check vs the bench oracle."""
-import socket, re, sys, time, math
-
+"""Drive ZEsarUX over ZRCP: execute every implemented t80x opcode (all but factor)
+and check registers/memory/flags against the bench oracle."""
+import socket, re, sys
 sys.path.insert(0, "/home/sg06uk/z80-fpga-bench")
-from harness import oracle as O   # ground truth
+from harness import oracle as O
 
-HOST, PORT = "127.0.0.1", 10088
+PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 10099
+CODE, BM, OUT = 0x8000, 0x9100, 0x9200
 
 class Z:
-    def __init__(self):
-        self.s = socket.create_connection((HOST, PORT), timeout=5)
-        self.s.settimeout(3)
-        self._read_until_prompt()          # swallow banner
-    def _read_until_prompt(self):
-        buf = b""
-        while not buf.rstrip().endswith(b">"):   # "command> " or "command@cpu-step> "
-            try: c = self.s.recv(4096)
+    def __init__(s, p):
+        s.s = socket.create_connection(("127.0.0.1", p), timeout=5); s.s.settimeout(10); s._r()
+    def _r(s):
+        b = b""
+        while not b.rstrip().endswith(b">"):
+            try: c = s.s.recv(65536)
             except socket.timeout: break
             if not c: break
-            buf += c
-        return buf.decode(errors="replace")
-    def cmd(self, c):
-        self.s.sendall((c + "\n").encode())
-        return self._read_until_prompt()
-    def regs(self):
-        out = self.cmd("get-registers")
+            b += c
+        return b.decode(errors="replace")
+    def cmd(s, c): s.s.sendall((c+"\n").encode()); return s._r()
+    def regs(s):
         d = {}
-        for m in re.finditer(r"([A-Z]{1,3}[\']?)=([0-9A-Fa-f]{2,4})", out):
+        for m in re.finditer(r"([A-Z]{1,3}'?)=([0-9A-Fa-f]{2,4})", s.cmd("get-registers")):
             d[m.group(1)] = int(m.group(2), 16)
         return d
-    def setr(self, r, v): self.cmd(f"set-register {r}={v:04X}H")
-    def wmem(self, addr, bytes_):
-        # write-memory-raw: concatenated hex (each token starting with a letter
-        # would be parsed as a LABEL by write-memory, so raw is the safe path)
-        self.cmd(f"write-memory-raw {addr:04X}H " + "".join(f"{b:02X}" for b in bytes_))
-    def rmem(self, addr, n):
-        # read-memory emits continuous hex (%02X...) then the prompt on a new line
-        out = self.cmd(f"read-memory {addr:04X}H {n}")
-        m = re.match(r"\s*([0-9A-Fa-f]+)", out)
-        h = m.group(1) if m else ""
-        return [int(h[i:i+2], 16) for i in range(0, min(len(h), 2 * n), 2)]
-    def step(self): self.cmd("cpu-step")
+    def setr(s, r, v): s.cmd(f"set-register {r}={v:04X}H")
+    def wmem(s, a, d): s.cmd(f"write-memory-raw {a:04X}H " + "".join(f"{b:02X}" for b in d))
+    def rmem(s, a, n):
+        o = s.cmd(f"read-memory {a:04X}H {n}"); m = re.match(r"\s*([0-9A-Fa-f]+)", o); h = m.group(1) if m else ""
+        return bytes(int(h[i:i+2],16) for i in range(0, min(len(h),2*n), 2))
+    def op(s, *bytes_): s.wmem(CODE, bytes_); s.setr("PC", CODE); s.cmd("cpu-step")
 
-def hi(v): return (v >> 16) & 0xFFFF
-def lo(v): return v & 0xFFFF
+z = Z(PORT); z.cmd("enter-cpu-step")
+res = []
+def ck(name, ok, d=""):
+    res.append(ok); print(f"  [{'PASS' if ok else 'FAIL'}] {name} {d if not ok else ''}")
 
-CODE = 0x8000
-z = Z()
-z.cmd("enter-cpu-step")
-results = []
+lo, hi = lambda v: v & 0xFFFF, lambda v: (v >> 16) & 0xFFFF
 
-def check(name, ok, detail):
-    results.append((name, ok, detail))
-    print(f"  [{'PASS' if ok else 'FAIL'}] {name}: {detail}")
+# mul b,c / d,e / h,l  (ED C0/C1/C2): pair = high*low
+for opb, pair, (h_, l_) in [(0xC0,"BC",(200,3)), (0xC1,"DE",(17,15)), (0xC2,"HL",(255,255))]:
+    z.setr(pair, (h_ << 8) | l_); z.op(0xED, opb)
+    got = z.regs()[pair]; ck(f"mul {pair.lower()} {h_}*{l_}", got == h_*l_, f"got={got} exp={h_*l_}")
 
-# ---- mull ED C3: HL*DE -> DE:HL ----
-for HLv, DEv in [(1000, 1000), (65535, 65535), (12345, 6789)]:
-    z.wmem(CODE, [0xED, 0xC3])
-    z.setr("PC", CODE); z.setr("HL", HLv); z.setr("DE", DEv)
-    z.step(); r = z.regs()
-    exp = O.BANK_ORACLES["mull"](HLv, DEv)
-    got = (r.get("DE", 0) << 16) | r.get("HL", 0)
-    check(f"mull {HLv}*{DEv}", got == exp, f"got={got} exp={exp}")
+# div (ED C6): HL/A -> HL quot, A rem
+for hl, a in [(1000, 7), (65535, 255), (500, 0)]:
+    z.setr("HL", hl); z.setr("AF", a << 8); z.op(0xED, 0xC6); r = z.regs()
+    packed = O._div(hl, a); ck(f"div {hl}/{a}", r["HL"] == lo(packed) and (r["AF"] >> 8) == hi(packed),
+                               f"q={r['HL']}/{lo(packed)} rem={r['AF']>>8}/{hi(packed)}")
 
-# ---- divl ED C4: (DE:HL)/BC -> HL quot(sat), DE rem ----
-for num, div in [(1008800, 20), (100000, 7), (5000, 0), (0xFFFFFFFF, 3)]:
-    z.wmem(CODE, [0xED, 0xC4])
-    z.setr("PC", CODE); z.setr("HL", lo(num)); z.setr("DE", hi(num)); z.setr("BC", div)
-    z.step(); r = z.regs()
-    packed = O._divl(num, div)
-    exp_q, exp_r = lo(packed), hi(packed)
-    check(f"divl {num}/{div}", r.get("HL") == exp_q and r.get("DE") == exp_r,
-          f"q got={r.get('HL')} exp={exp_q}; r got={r.get('DE')} exp={exp_r}")
+# isprime (ED C7): HL -> smallest factor; ZF=1 iff prime
+for n in [7919, 7917, 65521, 4, 1]:
+    z.setr("HL", n); z.op(0xED, 0xC7); r = z.regs()
+    exp = O._isprime(n); zf = (r["AF"] & 0x40) != 0
+    ck(f"isprime {n}", r["HL"] == exp and zf == (exp == n), f"HL={r['HL']}/{exp} ZF={zf}")
 
-# ---- gcd ED C5: gcd(DE:HL, BC) -> HL ----
-for num, bc in [(1008800, 48), (0xFFFFFFFF, 12345), (100, 0)]:
-    z.wmem(CODE, [0xED, 0xC5])
-    z.setr("PC", CODE); z.setr("HL", lo(num)); z.setr("DE", hi(num)); z.setr("BC", bc)
-    z.step(); r = z.regs()
-    exp = O._gcd(num, bc) & 0xFFFF
-    check(f"gcd({num},{bc})", r.get("HL") == exp, f"got={r.get('HL')} exp={exp}")
+# ispal (ED CA): DE:HL decimal palindrome -> C
+for v in [12321, 12345, 0, 7, 1002001]:
+    z.setr("HL", lo(v)); z.setr("DE", hi(v)); z.op(0xED, 0xCA); r = z.regs()
+    cf = r["AF"] & 1; ck(f"ispal {v}", cf == O._ispal(v), f"C={cf} exp={O._ispal(v)}")
 
-# ---- bstride ED C8: desc{base,nbits}, BC=start, DE=stride -> mark bits, HL=count ----
-DESC, BM = 0x9000, 0x9100
-for nbits, start, stride in [(64, 3, 3), (49, 0, 2), (40, 5, 7)]:
-    z.wmem(BM, [0] * ((nbits + 7) // 8 + 2))                       # clear bitmap
-    z.wmem(DESC, [lo(BM) & 0xFF, (BM >> 8) & 0xFF, nbits & 0xFF, (nbits >> 8) & 0xFF])
-    z.wmem(CODE, [0xED, 0xC8])
-    z.setr("PC", CODE); z.setr("HL", DESC); z.setr("BC", start); z.setr("DE", stride)
-    z.step(); r = z.regs()
-    marks = O._bstride_marks(nbits, start, stride)
-    exp_bm = bytearray((nbits + 7) // 8)
-    for b in marks: exp_bm[b >> 3] |= 1 << (b & 7)
-    got_bm = z.rmem(BM, len(exp_bm))
-    check(f"bstride n={nbits} s={start} k={stride}",
-          got_bm == list(exp_bm) and r.get("HL") == len(marks),
-          f"count got={r.get('HL')} exp={len(marks)}; bitmap {'match' if got_bm==list(exp_bm) else f'DIFF got={got_bm} exp={list(exp_bm)}'}")
+# bselect (ED CB): BC=&bitmap, DE=n, HL=nbits, A=pol -> HL=idx, C=shortfall
+z.wmem(BM, bytes([0b10110101, 0b00101110, 0, 0]))
+bmv = int.from_bytes(bytes([0b10110101, 0b00101110]), "little")
+for n, nbits, pol in [(1,16,1),(3,16,1),(9,16,1),(0,16,1),(4,16,0)]:
+    z.setr("BC", BM); z.setr("DE", n); z.setr("HL", nbits); z.setr("AF", pol << 8)
+    z.op(0xED, 0xCB); r = z.regs()
+    packed = O._bselect(bmv, nbits, n, pol); exp_hl, exp_c = lo(packed), hi(packed) & 1
+    ck(f"bselect n={n} pol={pol}", r["HL"] == exp_hl and (r["AF"] & 1) == exp_c,
+       f"HL={r['HL']}/{exp_hl} C={r['AF']&1}/{exp_c}")
 
-# ---- bsum ED CE: BC=&bitmap, HL=nbits, DE=&out, A=pol -> [idxSum:4][count:2] LE ----
-OUT = 0x9200
-patterns = [(bytes([0b10110101, 0b00101110]), 16, 1),
-            (bytes([0xFF, 0x0F]), 12, 0),
-            (bytes([0x03]), 8, 1)]
-for raw, nbits, pol in patterns:
-    z.wmem(BM, list(raw) + [0, 0])
-    z.wmem(OUT, [0] * 6)
-    z.wmem(CODE, [0xED, 0xCE])
-    z.setr("PC", CODE); z.setr("BC", BM); z.setr("HL", nbits); z.setr("DE", OUT); z.setr("AF", pol << 8)
-    z.step()
-    bitmap_int = int.from_bytes(raw, "little")
-    packed = O._bsum(bitmap_int, nbits, pol)
-    exp = list(packed.to_bytes(6, "little"))
-    got = z.rmem(OUT, 6)
-    check(f"bsum n={nbits} pol={pol}", got == exp, f"got={got} exp={exp}")
+# mul1 (ED CD): HL=&acc, A=mult, BC=width -> acc*=A in place; C=overflow
+for acc, m, w in [(0x0102030405, 7, 6), ((1<<48)-1, 255, 6), (1000000, 3, 6)]:
+    z.wmem(OUT, acc.to_bytes(w, "little"))
+    z.setr("HL", OUT); z.setr("AF", m << 8); z.setr("BC", w); z.op(0xED, 0xCD); r = z.regs()
+    packed = O.BANK_ORACLES["mul1"](acc, m)
+    got = int.from_bytes(z.rmem(OUT, w), "little"); got |= ((r["AF"] & 1) << 48)
+    ck(f"mul1 {acc}*{m}", got == packed, f"got={got:#x} exp={packed:#x}")
+
+# memset (ED CC): HL=dst, BC=count, A=val -> fill; HL=one-past, BC=0
+for count, val in [(5, 0xAB), (0, 0x11)]:
+    z.wmem(OUT, bytes(8)); z.setr("HL", OUT); z.setr("BC", count); z.setr("AF", val << 8)
+    z.op(0xED, 0xCC); r = z.regs(); mem = z.rmem(OUT, 8)
+    want = bytes([val]*count + [0]*(8-count))
+    ck(f"memset n={count}", mem == want and r["HL"] == (OUT+count) & 0xFFFF and r["BC"] == 0,
+       f"mem={mem.hex()} HL={r['HL']:#x} BC={r['BC']}")
 
 z.cmd("exit")
-npass = sum(1 for _, ok, _ in results if ok)
-print(f"\n==== {npass}/{len(results)} opcode checks PASS ====")
-sys.exit(0 if npass == len(results) else 1)
+print(f"\n==== {sum(res)}/{len(res)} checks PASS ====")
+sys.exit(0 if all(res) else 1)

@@ -2723,17 +2723,23 @@ void instruccion_ed_191 ()
 
 void instruccion_ed_192 ()
 {
-        invalid_opcode_ed("237 192");
+        // t80x ED C0: mul b,c -- BC = B * C (8x8 -> 16, high-half * low-half)
+        BC = (z80_int)reg_b * (z80_int)reg_c;
+        t_estados += 4;
 }
 
 void instruccion_ed_193 ()
 {
-        invalid_opcode_ed("237 193");
+        // t80x ED C1: mul d,e -- DE = D * E (8x8 -> 16)
+        DE = (z80_int)reg_d * (z80_int)reg_e;
+        t_estados += 4;
 }
 
 void instruccion_ed_194 ()
 {
-        invalid_opcode_ed("237 194");
+        // t80x ED C2: mul h,l -- HL = H * L (8x8 -> 16)
+        HL = (z80_int)reg_h * (z80_int)reg_l;
+        t_estados += 4;
 }
 
 void instruccion_ed_195 ()
@@ -2776,12 +2782,41 @@ void instruccion_ed_197 ()
 
 void instruccion_ed_198 ()
 {
-        invalid_opcode_ed("237 198");
+        // t80x ED C6: div -- HL / A -> HL quotient, A remainder.
+        // A==0 -> HL=0xFFFF, A=0 (mirrors the div engine / oracle).
+        z80_int dividend = HL;
+        z80_byte divisor = reg_a;
+        if (divisor == 0) {
+                HL = 0xFFFF;
+                reg_a = 0;
+        } else {
+                HL = dividend / divisor;
+                reg_a = dividend % divisor;
+        }
+        t_estados += 4;
 }
 
 void instruccion_ed_199 ()
 {
-        invalid_opcode_ed("237 199");
+        // t80x ED C7: isprime -- HL -> smallest prime factor of HL (HL itself if
+        // prime, or HL if HL<2). ZF=1 iff result==input (i.e. HL is prime).
+        z80_int n = HL;
+        z80_int res;
+        if (n < 2) {
+                res = n;
+        } else if ((n & 1) == 0) {
+                res = 2;
+        } else {
+                res = n;
+                z80_int d = 3;
+                while ((unsigned int)d * (unsigned int)d <= (unsigned int)n) {
+                        if (n % d == 0) { res = d; break; }
+                        d += 2;
+                }
+        }
+        HL = res;
+        if (res == n) Z80_FLAGS |= FLAG_Z; else Z80_FLAGS &= ~FLAG_Z;
+        t_estados += 4;
 }
 
 void instruccion_ed_200 ()
@@ -2814,12 +2849,40 @@ void instruccion_ed_201 ()
 
 void instruccion_ed_202 ()
 {
-        invalid_opcode_ed("237 202");
+        // t80x ED CA: ispal -- is the decimal representation of DE:HL a
+        // palindrome? C=1 if yes (0 and any 1-digit value are palindromes).
+        unsigned int v = ((unsigned int)DE << 16) | HL;
+        z80_byte digits[10];
+        int nd = 0, pal = 1, i;
+        do { digits[nd++] = v % 10; v /= 10; } while (v && nd < 10);
+        for (i = 0; i < nd / 2; i++)
+                if (digits[i] != digits[nd - 1 - i]) { pal = 0; break; }
+        if (pal) Z80_FLAGS |= FLAG_C; else Z80_FLAGS &= ~FLAG_C;
+        t_estados += 4;
 }
 
 void instruccion_ed_203 ()
 {
-        invalid_opcode_ed("237 203");
+        // t80x ED CB: bselect -- BC=&bitmap, DE=n (1-based), HL=nbits, A=polarity.
+        // HL = 0-based index of the nth matching bit; C=1 on shortfall (HL=nbits).
+        // n==0 and n>popcount both -> C=1, HL=nbits (one-past-end sentinel).
+        z80_int bitmap = BC;
+        z80_int n = DE;
+        z80_int nbits = HL;
+        z80_byte want = reg_a & 1;
+        z80_int i, count = 0, result = nbits;
+        int found = 0;
+        if (n != 0) {
+                for (i = 0; i < nbits; i++) {
+                        z80_byte b = peek_byte(bitmap + (i >> 3));
+                        if (((b >> (i & 7)) & 1) == want) {
+                                if (++count == n) { result = i; found = 1; break; }
+                        }
+                }
+        }
+        HL = result;
+        if (found) Z80_FLAGS &= ~FLAG_C; else Z80_FLAGS |= FLAG_C;
+        t_estados += 4;
 }
 
 void instruccion_ed_204 ()
@@ -2842,7 +2905,20 @@ void instruccion_ed_204 ()
 
 void instruccion_ed_205 ()
 {
-        invalid_opcode_ed("237 205");
+        // t80x ED CD: mul1 -- HL=&acc, A=multiplicand, BC=width in bytes. Multiply
+        // the little-endian acc[width] by A in place (mpn_mul_1); C=1 on overflow
+        // (a nonzero carry out of the top byte). Registers HL/BC/A preserved.
+        z80_int p = HL;
+        z80_int w = BC;
+        z80_byte m = reg_a;
+        unsigned int carry = 0, i;
+        for (i = 0; i < w; i++) {
+                unsigned int prod = (unsigned int)peek_byte((p + i) & 0xFFFF) * m + carry;
+                poke_byte((p + i) & 0xFFFF, prod & 0xFF);
+                carry = prod >> 8;
+        }
+        if (carry) Z80_FLAGS |= FLAG_C; else Z80_FLAGS &= ~FLAG_C;
+        t_estados += 4;
 }
 
 void instruccion_ed_206 ()
