@@ -112,9 +112,9 @@ prog += line(130, K('LET')+s('o=')+frames()+s('-f'))
 prog += line(140, K('LET')+s('f=')+frames())
 prog += line(150, K('RANDOMIZE','USR')+num(USR_SOFT))
 prog += line(160, K('LET')+s('w=')+frames()+s('-f'))
-prog += line(170, K('PRINT')+s('n;" opcode  : ";o;" frame ~";')+K('INT')+s('(o*')+num(273)+s('*')+num(256)+s('/n);" T"'))
-prog += line(180, K('PRINT')+s('n;" softwre : ";w;" frame ~";')+K('INT')+s('(w*')+num(273)+s('*')+num(256)+s('/n);" T"'))
-prog += line(190, K('PRINT')+s('"opcode ~";')+K('INT')+s('(w/o);"x faster"'))
+prog += line(170, K('PRINT')+s('"opcode:   ";o/')+num(50)+s(';" s  ~";')+K('INT')+s('(o*')+num(273)+s('*')+num(256)+s('/n);" T"'))
+prog += line(180, K('PRINT')+s('"software: ";w/')+num(50)+s(';" s  ~";')+K('INT')+s('(w*')+num(273)+s('*')+num(256)+s('/n);" T"'))
+prog += line(190, K('PRINT')+[ord('n')]+s(';" mults; opcode ~";')+K('INT')+s('(w/o);"x faster"'))
 
 def block(flag, data):
     body = [flag] + data
