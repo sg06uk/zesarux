@@ -2738,17 +2738,40 @@ void instruccion_ed_194 ()
 
 void instruccion_ed_195 ()
 {
-        invalid_opcode_ed("237 195");
+        // t80x ED C3: mull -- HL*DE -> DE:HL (32-bit, HL low / DE high)
+        unsigned int p = (unsigned int)HL * (unsigned int)DE;
+        HL = p & 0xFFFF;
+        DE = (p >> 16) & 0xFFFF;
+        t_estados += 4;
 }
 
 void instruccion_ed_196 ()
 {
-        invalid_opcode_ed("237 196");
+        // t80x ED C4: divl -- (DE:HL) / BC -> HL quotient (saturates 0xFFFF),
+        // DE remainder. BC==0 -> HL=0xFFFF, DE=0 (mirrors div engine / oracle).
+        unsigned int dividend = ((unsigned int)DE << 16) | HL;
+        z80_int divisor = BC;
+        if (divisor == 0) {
+                HL = 0xFFFF;
+                DE = 0;
+        } else {
+                unsigned int q = dividend / divisor;
+                unsigned int r = dividend % divisor;
+                if (q > 0xFFFF) q = 0xFFFF;
+                HL = q;
+                DE = r;
+        }
+        t_estados += 4;
 }
 
 void instruccion_ed_197 ()
 {
-        invalid_opcode_ed("237 197");
+        // t80x ED C5: gcd -- gcd(DE:HL, BC) -> HL (Euclid; gcd(x,0)=x)
+        unsigned int a = ((unsigned int)DE << 16) | HL;
+        unsigned int b = BC;
+        while (b) { unsigned int t = a % b; a = b; b = t; }
+        HL = a & 0xFFFF;
+        t_estados += 4;
 }
 
 void instruccion_ed_198 ()
@@ -2763,7 +2786,25 @@ void instruccion_ed_199 ()
 
 void instruccion_ed_200 ()
 {
-        invalid_opcode_ed("237 200");
+        // t80x ED C8: bstride -- HL=&desc{base:16,nbits:16} (LE), BC=start, DE=stride.
+        // OR-mark bits start, start+stride, ... < nbits (LSB-first); HL = count.
+        // stride==0 -> no-op, HL=0. Index arithmetic wraps mod 65536 (per oracle).
+        z80_int desc  = HL;
+        z80_int base  = peek_byte(desc)   | (peek_byte(desc + 1) << 8);
+        z80_int nbits = peek_byte(desc + 2) | (peek_byte(desc + 3) << 8);
+        z80_int stride = DE;
+        z80_int count = 0;
+        if (stride != 0) {
+                z80_int j = BC;
+                while (j < nbits) {
+                        z80_int addr = base + (j >> 3);
+                        poke_byte(addr, peek_byte(addr) | (1 << (j & 7)));
+                        count++;
+                        j = (j + stride) & 0xFFFF;
+                }
+        }
+        HL = count;
+        t_estados += 4;
 }
 
 void instruccion_ed_201 ()
@@ -2793,7 +2834,30 @@ void instruccion_ed_205 ()
 
 void instruccion_ed_206 ()
 {
-        invalid_opcode_ed("237 206");
+        // t80x ED CE: bsum -- BC=&bitmap, HL=nbits, DE=&out, A=polarity(bit0).
+        // Sum indices + count of bits matching polarity (LSB-first); write
+        // [idxSum:32][count:16] little-endian to (DE) -- 6 bytes.
+        z80_int bitmap = BC;
+        z80_int nbits  = HL;
+        z80_int out    = DE;
+        z80_byte want  = reg_a & 1;
+        unsigned int idxsum = 0;
+        z80_int cnt = 0;
+        z80_int i;
+        for (i = 0; i < nbits; i++) {
+                z80_byte b = peek_byte(bitmap + (i >> 3));
+                if (((b >> (i & 7)) & 1) == want) {
+                        idxsum += i;
+                        cnt++;
+                }
+        }
+        poke_byte(out,     idxsum & 0xFF);
+        poke_byte(out + 1, (idxsum >> 8) & 0xFF);
+        poke_byte(out + 2, (idxsum >> 16) & 0xFF);
+        poke_byte(out + 3, (idxsum >> 24) & 0xFF);
+        poke_byte(out + 4, cnt & 0xFF);
+        poke_byte(out + 5, (cnt >> 8) & 0xFF);
+        t_estados += 4;
 }
 
 void instruccion_ed_207 ()
