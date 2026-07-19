@@ -2844,7 +2844,70 @@ void instruccion_ed_200 ()
 
 void instruccion_ed_201 ()
 {
-        invalid_opcode_ed("237 201");
+        // t80x ED C9: factor -- HL=&n (len-byte LE), A=len(1..8), BC=&out,
+        // DE=cap (entries). Emit ascending prime factors (len-byte LE each, with
+        // prime-power repeats) to (BC). Out: BC=one-past-last, HL=count, F=status:
+        //   COMPLETE 00 | OVERFLOW 01(C) | UNRESOLVED 41(C+Z) | INVALID 44(Z+PV).
+        // Any terminal that cannot write its defining final entry degrades to
+        // OVERFLOW. INVALID / zero-cap: HL=0, BC unchanged. (BMAX=131071.)
+        z80_int nptr = HL;
+        z80_byte len = reg_a;
+        z80_int out = BC;
+        z80_int cap = DE;
+        const unsigned int BMAX = 131071;
+        unsigned long long factors[66];
+        int nf = 0, i;
+        z80_byte status;
+
+        if (len == 0 || len > 8) {
+                HL = 0;                              // INVALID: BC unchanged, HL=0
+                Z80_FLAGS = 0x44;
+                t_estados += 4;
+                return;
+        }
+        unsigned long long n = 0;
+        for (i = 0; i < len; i++)
+                n |= (unsigned long long)peek_byte((nptr + i) & 0xFFFF) << (8 * i);
+
+        if (n < 2) {
+                status = 0x44;                       // INVALID
+        } else {
+                unsigned long long cof = n;
+                unsigned int d = 2;
+                for (;;) {
+                        if (cof % d == 0) {
+                                factors[nf++] = d;
+                                cof /= d;
+                                if (cof == 1) { status = 0x00; break; }   // COMPLETE
+                                continue;
+                        }
+                        unsigned int nxt = (d == 2) ? 3 : d + 2;
+                        if ((unsigned long long)nxt * nxt > cof) {
+                                factors[nf++] = cof; status = 0x00; break; // prime -> COMPLETE
+                        }
+                        if (nxt > BMAX) {
+                                factors[nf++] = cof; status = 0x41; break; // UNRESOLVED (residual)
+                        }
+                        d = nxt;
+                }
+        }
+
+        z80_int count = nf;
+        if ((unsigned int)nf > cap) { count = cap; status = 0x01; }        // OVERFLOW: prefix only
+        z80_int w = out;
+        for (i = 0; i < count; i++) {
+                unsigned long long f = factors[i];
+                int j;
+                for (j = 0; j < len; j++) {
+                        poke_byte(w, f & 0xFF);
+                        w = (w + 1) & 0xFFFF;
+                        f >>= 8;
+                }
+        }
+        BC = (count == 0) ? out : w;                 // one-past-last (unchanged if none)
+        HL = count;
+        Z80_FLAGS = status;
+        t_estados += 4;
 }
 
 void instruccion_ed_202 ()

@@ -87,6 +87,30 @@ for count, val in [(5, 0xAB), (0, 0x11)]:
     ck(f"memset n={count}", mem == want and r["HL"] == (OUT+count) & 0xFFFF and r["BC"] == 0,
        f"mem={mem.hex()} HL={r['HL']:#x} BC={r['BC']}")
 
+# factor (ED C9): HL=&n(len-byte LE), A=len, BC=&out, DE=cap -> factors, HL=count, F=status
+NADDR, FOUT = 0x9300, 0x9400
+def _isp(m):
+    if m < 2: return False
+    i = 2
+    while i*i <= m:
+        if m % i == 0: return False
+        i += 1
+    return True
+def nextp(x):
+    while not _isp(x): x += 1
+    return x
+p = nextp(200000); q = nextp(p+1)
+for n, ln, cap in [(12,2,8),(7919,2,8),(1,2,8),(60,2,2),(4294967291,4,8),(p*q,6,8)]:
+    z.wmem(NADDR, n.to_bytes(ln, "little")); z.wmem(FOUT, bytes(80))
+    z.setr("HL", NADDR); z.setr("AF", ln << 8); z.setr("BC", FOUT); z.setr("DE", cap)
+    z.op(0xED, 0xC9); r = z.regs()
+    ef, ec, eF = O.factor_all(n, cap)
+    gc = r["HL"]; gF = r["AF"] & 0xFF
+    raw = z.rmem(FOUT, gc*ln) if gc else b""
+    gf = [int.from_bytes(raw[i*ln:(i+1)*ln], "little") for i in range(gc)]
+    ck(f"factor {n} cap={cap}", gf == ef and gc == ec and gF == eF,
+       f"f={gf}/{ef} cnt={gc}/{ec} F={gF:#x}/{eF:#x}")
+
 z.cmd("exit")
 print(f"\n==== {sum(res)}/{len(res)} checks PASS ====")
 sys.exit(0 if all(res) else 1)
