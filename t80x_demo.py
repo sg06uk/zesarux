@@ -86,6 +86,11 @@ z.cmd("run")
 regs = z.cmd("get-registers")         # drain run's trailing output + resync before the big read
 vprint("stopped at PC=0x%04X" % int(re.search(r"PC=([0-9A-Fa-f]{4})", regs).group(1), 16))
 disp = z.rmem(0x4000, 6912)
+# leave step mode so the GUI closes the debugger/menu and shows the drawn screen.
+# (entering step mode opened the menu; disable the breakpoint first so resuming at
+# the HALT doesn't immediately re-break. The DI trampoline keeps the CPU parked.)
+z.cmd("disable-breakpoints")
+z.cmd("exit-cpu-step")
 z.cmd("exit")
 
 if PNG or VERBOSE:
