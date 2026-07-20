@@ -2879,6 +2879,7 @@ void instruccion_ed_201 ()
         const unsigned int BMAX = 131071;
         unsigned long long factors[66];
         int nf = 0, i;
+        unsigned int mods = 0;   // bit-serial modulo tests (drives the cycle cost)
         z80_byte status;
 
         if (len == 0 || len > 8) {
@@ -2900,6 +2901,7 @@ void instruccion_ed_201 ()
                 unsigned long long cof = n;
                 unsigned int d = 2;
                 for (;;) {
+                        mods++;
                         if (cof % d == 0) {
                                 factors[nf++] = d;
                                 cof /= d;
@@ -2932,9 +2934,12 @@ void instruccion_ed_201 ()
         BC = (count == 0) ? out : w;                 // one-past-last (unchanged if none)
         HL = count;
         Z80_FLAGS = status;
-        t_estados += 4;   // APPROXIMATE: factor's RTL latency depends on both the
-                          // trial-candidate count AND the number of factors emitted
-                          // (measured 113@12, 214@360, 788@7919, 2216@65521, 269@1024);
+        // RTL: a bit-serial modulo over the whole operand per candidate --
+        // ~38 + mods*(8*len + 1) T, i.e. about 1 T per operand BIT per candidate.
+        // Measured 113/185/329 @ len 2/4/8 for n=12, 788/1504/2936 for n=7919, and
+        // 30417 for the Euler-3 number at len=5 (model 30337, ~0.3% low). Close
+        // fit rather than exact: the engine also charges per emit/divide-out.
+        t_estados += 30 + mods * (8u * len + 1u);
                           // no clean closed form yet, so this stays a placeholder.
 }
 
