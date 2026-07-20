@@ -39,9 +39,13 @@ EX = {
     9:  dict(rep=200, d="euler9",  op="euler9_euclid_op.asm", sw="euler9_euclid_sw.asm",
              answer=0xF020, nbytes=4, clear=59999,
              title=["Pythagorean triplet", "with a+b+c=1000"]),
-    10: dict(rep=1, d="euler10", op="euler10_op.asm",       sw="euler10_sw.asm",
-             answer=None, nbytes=6, clear=32767,
-             title=["sum of all primes", "below 2,000,000"]),
+    # euler10's sources are TEMPLATES built by its own profile.py (build_op_src /
+    # build_sw_src). Its software leg at the full 2,000,000 limit is impractical on
+    # a Spectrum -- the bench only sanity-checks sw at 50,000 -- so the tape uses
+    # that same reduced limit for BOTH legs, keeping the race like-for-like.
+    10: dict(rep=1, d="euler10", srcmod=True, limit=50000,
+             answer=0xF020, nbytes=6, clear=32767,
+             title=["sum of all primes", "below 50,000"]),
 }
 
 def answer_addr(cfg):
@@ -110,9 +114,19 @@ def block(flag, data):
 
 def build(n):
     cfg = EX[n]
-    zdir = os.path.join(BENCH, "exercises", cfg["d"], "z80")
-    op_src = open(os.path.join(zdir, cfg["op"])).read()
-    sw_src = open(os.path.join(zdir, cfg["sw"])).read()
+    if cfg.get("srcmod"):
+        import importlib.util
+        mp = os.path.join(BENCH, "exercises", cfg["d"], "profile.py")
+        spec = importlib.util.spec_from_file_location("ex_%s" % cfg["d"], mp)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        op_src = mod.build_op_src(cfg["limit"])
+        sw_src = mod.build_sw_src(cfg["limit"])
+    else:
+        zdir = os.path.join(BENCH, "exercises", cfg["d"], "z80")
+        op_src = open(os.path.join(zdir, cfg["op"])).read()
+        sw_src = open(os.path.join(zdir, cfg["sw"])).read()
     addr, nb = answer_addr(cfg), cfg["nbytes"]
 
     PROG = 23755
