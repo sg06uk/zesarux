@@ -2777,9 +2777,24 @@ void instruccion_ed_197 ()
         // t80x ED C5: gcd -- gcd(DE:HL, BC) -> HL (Euclid; gcd(x,0)=x)
         unsigned int a = ((unsigned int)DE << 16) | HL;
         unsigned int b = BC;
+        // cycle model: the RTL engine is BINARY GCD (Stein) -- one shift-or-
+        // subtract per clock. 10 T for the trivial b==0/a==0 exit, else
+        // 13 + steps. (8 already charged for the ED fetch.)
+        if (a == 0 || b == 0) {
+                t_estados += 2;
+        } else {
+                unsigned int aa = a, bb = b, steps = 0;
+                while (((aa | bb) & 1) == 0) { aa >>= 1; bb >>= 1; steps++; }   // common 2s
+                while ((aa & 1) == 0) { aa >>= 1; steps++; }                    // make a odd
+                while (bb) {
+                        if ((bb & 1) == 0) { bb >>= 1; }
+                        else { if (aa > bb) { unsigned int t = aa; aa = bb; bb = t; } bb -= aa; }
+                        steps++;
+                }
+                t_estados += 5 + steps;
+        }
         while (b) { unsigned int t = a % b; a = b; b = t; }
         HL = a & 0xFFFF;
-        t_estados += 4;
 }
 
 void instruccion_ed_198 ()
@@ -2869,7 +2884,10 @@ void instruccion_ed_201 ()
         if (len == 0 || len > 8) {
                 HL = 0;                              // INVALID: BC unchanged, HL=0
                 Z80_FLAGS = 0x44;
-                t_estados += 4;
+                t_estados += 4;   // APPROXIMATE: factor's RTL latency depends on both the
+                          // trial-candidate count AND the number of factors emitted
+                          // (measured 113@12, 214@360, 788@7919, 2216@65521, 269@1024);
+                          // no clean closed form yet, so this stays a placeholder.
                 return;
         }
         unsigned long long n = 0;
@@ -2914,7 +2932,10 @@ void instruccion_ed_201 ()
         BC = (count == 0) ? out : w;                 // one-past-last (unchanged if none)
         HL = count;
         Z80_FLAGS = status;
-        t_estados += 4;
+        t_estados += 4;   // APPROXIMATE: factor's RTL latency depends on both the
+                          // trial-candidate count AND the number of factors emitted
+                          // (measured 113@12, 214@360, 788@7919, 2216@65521, 269@1024);
+                          // no clean closed form yet, so this stays a placeholder.
 }
 
 void instruccion_ed_202 ()
@@ -2952,7 +2973,10 @@ void instruccion_ed_203 ()
         }
         HL = result;
         if (found) Z80_FLAGS &= ~FLAG_C; else Z80_FLAGS |= FLAG_C;
-        t_estados += 4;
+        // RTL: 12 + 3*bytes_scanned T (measured 15@1B, 18@2B, 39@9B) -- it walks
+        // a byte at a time, stopping at the byte holding the nth match.
+        t_estados += 4 + 3 * (found ? (((unsigned int)result >> 3) + 1)
+                                    : (((unsigned int)nbits + 7) / 8));
 }
 
 void instruccion_ed_204 ()
@@ -2988,7 +3012,7 @@ void instruccion_ed_205 ()
                 carry = prod >> 8;
         }
         if (carry) Z80_FLAGS |= FLAG_C; else Z80_FLAGS &= ~FLAG_C;
-        t_estados += 4;
+        t_estados += 4 + 6 * (unsigned int)w;   // RTL: 12 + 6*width (18/24/36/48/60 @ w=1/2/4/6/8)
 }
 
 void instruccion_ed_206 ()
