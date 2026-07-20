@@ -27,14 +27,18 @@ SAVESP = 0xFFFC
 REPCNT = 0xFFF8
 
 EX = {
-    6:  dict(rep=2000, d="euler6",  op="euler6_mull.asm",      sw="euler6_nomul.asm",
+    6:  dict(rep=1500, d="euler6",  op="euler6_mull.asm",      sw="euler6_nomul.asm",
              answer=None, nbytes=4, clear=32767,
              title=["sum-square difference", "for 1 to 100"]),
-    7:  dict(rep=20, d="euler7",  op="euler7_sieve_op.asm",  sw="euler7_sieve.asm",
+    7:  dict(rep=1, d="euler7",  op="euler7_sieve_op.asm",  sw="euler7_sieve.asm",
              answer=None, nbytes=4, clear=32767,
              title=["the 10001st prime"]),
-    8:  dict(rep=200, d="euler8",  op="euler8_op.asm",        sw="euler8_vanilla.asm",
-             answer=None, nbytes=8, clear=32767,
+    # euler8's .asm carry a `; @@DIGITS@@` placeholder that its profile.py fills
+    # with the 1000-digit number via defb_block(); without it the program
+    # multiplies whatever happens to be in RAM.
+    8:  dict(rep=1, d="euler8",  op="euler8_op.asm",        sw="euler8_vanilla.asm",
+             fixups=[("; @@DIGITS@@", "defb_block")],
+             answer=None, nbytes=6, clear=32767,
              title=["largest product of 13", "adjacent digits"]),
     9:  dict(rep=200, d="euler9",  op="euler9_euclid_op.asm", sw="euler9_euclid_sw.asm",
              answer=0xF020, nbytes=4, clear=59999,
@@ -48,10 +52,15 @@ EX = {
              title=["sum of all primes", "below 50,000"]),
 }
 
-def answer_addr(cfg):
-    """ANSWER_ADDR from the exercise's own profile.py unless pinned above."""
+def answer_addr(cfg, op_src=None):
+    """The exercise declares its own `defc answer = ADDR`; prefer that. Fall back
+    to ANSWER_ADDR in profile.py (used by the template-built exercises)."""
     if cfg["answer"] is not None:
         return cfg["answer"]
+    if op_src:
+        m = re.search(r"^\s*defc\s+answer\s*=\s*(0x[0-9A-Fa-f]+|\d+)", op_src, re.M)
+        if m:
+            return int(m.group(1), 0)
     p = open(os.path.join(BENCH, "exercises", cfg["d"], "profile.py")).read()
     m = re.search(r"^ANSWER_ADDR\s*=\s*(0x[0-9A-Fa-f]+|\d+)", p, re.M)
     if not m:
@@ -90,7 +99,7 @@ def assemble(src, org):
         return b[org:] if len(b) > org > 0 else b
 
 TOK = {'REM':0xEA,'RANDOMIZE':0xF9,'USR':0xC0,'LET':0xF1,'PEEK':0xBE,'PRINT':0xF5,
-       'INT':0xBA,'CLEAR':0xFD}
+       'INT':0xBA,'CLEAR':0xFD,'POKE':0xF4}
 def K(*n): return [TOK[x] for x in n]
 def num(v): return list(str(v).encode()) + [0x0E,0x00,0x00,v & 0xFF,(v >> 8) & 0xFF,0x00]
 def s(t): return list(t.encode())
@@ -127,7 +136,23 @@ def build(n):
         zdir = os.path.join(BENCH, "exercises", cfg["d"], "z80")
         op_src = open(os.path.join(zdir, cfg["op"])).read()
         sw_src = open(os.path.join(zdir, cfg["sw"])).read()
-    addr, nb = answer_addr(cfg), cfg["nbytes"]
+        for ph, fn in cfg.get("fixups", []):
+            import importlib.util
+            mp = os.path.join(BENCH, "exercises", cfg["d"], "profile.py")
+            spec = importlib.util.spec_from_file_location("ex_%s" % cfg["d"], mp)
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = mod
+            spec.loader.exec_module(mod)
+            filled = getattr(mod, fn)()
+            op_src = op_src.replace(ph, filled)
+            sw_src = sw_src.replace(ph, filled)
+    # never ship a source with an unfilled template slot -- it assembles fine and
+    # then silently computes nonsense (this bit euler8's digit table)
+    for nm, src in (("op", op_src), ("sw", sw_src)):
+        if "@@" in src:
+            sys.exit("euler%d %s source still has an unfilled placeholder: %s"
+                     % (n, nm, re.findall(r"@@[A-Z_]+@@", src)[:3]))
+    addr, nb = answer_addr(cfg, op_src), cfg["nbytes"]
 
     PROG = 23755
     rep = cfg["rep"]
@@ -145,18 +170,24 @@ def build(n):
     ln = 10
     for t in cfg["title"]:
         prog += line(ln, K('PRINT') + s('"%s"' % t)); ln += 10
+    for i in range(nb):
+        prog += line(ln, K('POKE')+num(addr+i)+s(',')+num(0)); ln += 10
     prog += line(ln,    K('LET')+s('f=')+frames());                      ln += 10
     prog += line(ln,    K('RANDOMIZE','USR')+num(usr_op));               ln += 10
     prog += line(ln,    K('LET')+s('o=')+frames()+s('-f'));              ln += 10
+    prog += line(ln,    K('LET')+s('o=o+(o=')+num(0)+s(')'));            ln += 10
     prog += line(ln,    K('LET')+s('a=')+peekn(addr, nb));               ln += 10
     prog += line(ln,    K('PRINT')+s('"answer = ";a'));                  ln += 10
     prog += line(ln,    K('PRINT')+s('"opcode:   ";o/')+num(50)+s(';" s"')); ln += 10
+    for i in range(nb):
+        prog += line(ln, K('POKE')+num(addr+i)+s(',')+num(0)); ln += 10
     prog += line(ln,    K('LET')+s('f=')+frames());                      ln += 10
     prog += line(ln,    K('RANDOMIZE','USR')+num(usr_sw));               ln += 10
     prog += line(ln,    K('LET')+s('w=')+frames()+s('-f'));              ln += 10
     prog += line(ln,    K('LET')+s('b=')+peekn(addr, nb));               ln += 10
     prog += line(ln,    K('PRINT')+s('"software: ";w/')+num(50)+s(';" s (";b;")"')); ln += 10
-    prog += line(ln,    K('PRINT')+num(rep)+s(';" runs; opcode ";')+K('INT')+s('(w/o);"x"'))
+    prog += line(ln,    K('PRINT')+num(rep)+s(';" runs; opcode ";')+K('INT')
+                        +s('(w/o*')+num(100)+s(')/')+num(100)+s(';"x"'))
 
     plen = len(prog)
     name = ("EULER%-5d" % n)[:10].encode()
