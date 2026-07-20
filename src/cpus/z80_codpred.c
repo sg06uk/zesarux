@@ -2725,21 +2725,21 @@ void instruccion_ed_192 ()
 {
         // t80x ED C0: mul b,c -- BC = B * C (8x8 -> 16, high-half * low-half)
         BC = (z80_int)reg_b * (z80_int)reg_c;
-        t_estados += 4;
+        // RTL: 8 T total -- exactly the ED fetch already charged, so nothing to add
 }
 
 void instruccion_ed_193 ()
 {
         // t80x ED C1: mul d,e -- DE = D * E (8x8 -> 16)
         DE = (z80_int)reg_d * (z80_int)reg_e;
-        t_estados += 4;
+        // RTL: 8 T total -- exactly the ED fetch already charged, so nothing to add
 }
 
 void instruccion_ed_194 ()
 {
         // t80x ED C2: mul h,l -- HL = H * L (8x8 -> 16)
         HL = (z80_int)reg_h * (z80_int)reg_l;
-        t_estados += 4;
+        // RTL: 8 T total -- exactly the ED fetch already charged, so nothing to add
 }
 
 void instruccion_ed_195 ()
@@ -2748,7 +2748,7 @@ void instruccion_ed_195 ()
         unsigned int p = (unsigned int)HL * (unsigned int)DE;
         HL = p & 0xFFFF;
         DE = (p >> 16) & 0xFFFF;
-        t_estados += 4;
+        t_estados += 1;         // RTL: 9 T total (8 already charged for the ED fetch)
 }
 
 void instruccion_ed_196 ()
@@ -2757,6 +2757,9 @@ void instruccion_ed_196 ()
         // DE remainder. BC==0 -> HL=0xFFFF, DE=0 (mirrors div engine / oracle).
         unsigned int dividend = ((unsigned int)DE << 16) | HL;
         z80_int divisor = BC;
+        // RTL: 26 T for the valid DE<BC case (16 limb steps), 42 T when DE>=BC
+        // takes the full 32-step divide. (8 already charged for the ED fetch.)
+        t_estados += (DE >= divisor) ? 34 : 18;
         if (divisor == 0) {
                 HL = 0xFFFF;
                 DE = 0;
@@ -2767,7 +2770,6 @@ void instruccion_ed_196 ()
                 HL = q;
                 DE = r;
         }
-        t_estados += 4;
 }
 
 void instruccion_ed_197 ()
@@ -2793,7 +2795,7 @@ void instruccion_ed_198 ()
                 HL = dividend / divisor;
                 reg_a = dividend % divisor;
         }
-        t_estados += 4;
+        t_estados += 17;        // RTL: 25 T (clocked 16-step restoring divide), incl. divide-by-0
 }
 
 void instruccion_ed_199 ()
@@ -2802,6 +2804,7 @@ void instruccion_ed_199 ()
         // prime, or HL if HL<2). ZF=1 iff result==input (i.e. HL is prime).
         z80_int n = HL;
         z80_int res;
+        unsigned int trials = 0;        // trial divisions the engine walks
         if (n < 2) {
                 res = n;
         } else if ((n & 1) == 0) {
@@ -2810,13 +2813,16 @@ void instruccion_ed_199 ()
                 res = n;
                 z80_int d = 3;
                 while ((unsigned int)d * (unsigned int)d <= (unsigned int)n) {
+                        trials++;
                         if (n % d == 0) { res = d; break; }
                         d += 2;
                 }
         }
         HL = res;
         if (res == n) Z80_FLAGS |= FLAG_Z; else Z80_FLAGS &= ~FLAG_Z;
-        t_estados += 4;
+        // RTL: 14 + 19*trials T (bit-serial modulo per candidate); measured
+        // 14 @ n=2, 33 @ n=17, 2427 @ n=65521. 8 already charged for the fetch.
+        t_estados += 6 + 19 * trials;
 }
 
 void instruccion_ed_200 ()
@@ -2825,21 +2831,22 @@ void instruccion_ed_200 ()
         // OR-mark bits start, start+stride, ... < nbits (LSB-first); HL = count.
         // stride==0 -> no-op, HL=0. Index arithmetic wraps mod 65536 (per oracle).
         z80_int desc  = HL;
-        z80_int base  = peek_byte(desc)   | (peek_byte(desc + 1) << 8);
-        z80_int nbits = peek_byte(desc + 2) | (peek_byte(desc + 3) << 8);
+        z80_int base  = peek_byte_no_time(desc)   | (peek_byte_no_time(desc + 1) << 8);
+        z80_int nbits = peek_byte_no_time(desc + 2) | (peek_byte_no_time(desc + 3) << 8);
         z80_int stride = DE;
         z80_int count = 0;
         if (stride != 0) {
                 z80_int j = BC;
                 while (j < nbits) {
                         z80_int addr = base + (j >> 3);
-                        poke_byte(addr, peek_byte(addr) | (1 << (j & 7)));
+                        poke_byte_no_time(addr, peek_byte_no_time(addr) | (1 << (j & 7)));
                         count++;
                         j = (j + stride) & 0xFFFF;
                 }
         }
         HL = count;
-        t_estados += 4;
+        // RTL: 24 + 6*marks T (measured: 30@1, 120@16, 210@31, 786@127, 1554@255)
+        t_estados += 16 + 6 * (unsigned int)count;
 }
 
 void instruccion_ed_201 ()
@@ -2867,7 +2874,7 @@ void instruccion_ed_201 ()
         }
         unsigned long long n = 0;
         for (i = 0; i < len; i++)
-                n |= (unsigned long long)peek_byte((nptr + i) & 0xFFFF) << (8 * i);
+                n |= (unsigned long long)peek_byte_no_time((nptr + i) & 0xFFFF) << (8 * i);
 
         if (n < 2) {
                 status = 0x44;                       // INVALID
@@ -2899,7 +2906,7 @@ void instruccion_ed_201 ()
                 unsigned long long f = factors[i];
                 int j;
                 for (j = 0; j < len; j++) {
-                        poke_byte(w, f & 0xFF);
+                        poke_byte_no_time(w, f & 0xFF);
                         w = (w + 1) & 0xFFFF;
                         f >>= 8;
                 }
@@ -2921,7 +2928,7 @@ void instruccion_ed_202 ()
         for (i = 0; i < nd / 2; i++)
                 if (digits[i] != digits[nd - 1 - i]) { pal = 0; break; }
         if (pal) Z80_FLAGS |= FLAG_C; else Z80_FLAGS &= ~FLAG_C;
-        t_estados += 4;
+        t_estados += 34;        // RTL: fixed 42 T (clocked double-dabble), value-independent
 }
 
 void instruccion_ed_203 ()
@@ -2937,7 +2944,7 @@ void instruccion_ed_203 ()
         int found = 0;
         if (n != 0) {
                 for (i = 0; i < nbits; i++) {
-                        z80_byte b = peek_byte(bitmap + (i >> 3));
+                        z80_byte b = peek_byte_no_time(bitmap + (i >> 3));
                         if (((b >> (i & 7)) & 1) == want) {
                                 if (++count == n) { result = i; found = 1; break; }
                         }
@@ -2958,12 +2965,12 @@ void instruccion_ed_204 ()
         z80_byte val = reg_a;
         z80_int i;
         for (i = 0; i < count; i++) {
-                poke_byte(dst, val);
+                poke_byte_no_time(dst, val);
                 dst = (dst + 1) & 0xFFFF;
         }
         HL = dst;
         BC = 0;
-        t_estados += 4;
+        t_estados += 5 + 3 * (unsigned int)count;   // RTL: 13 + 3*count T (61@16, 205@64)
 }
 
 void instruccion_ed_205 ()
@@ -2976,8 +2983,8 @@ void instruccion_ed_205 ()
         z80_byte m = reg_a;
         unsigned int carry = 0, i;
         for (i = 0; i < w; i++) {
-                unsigned int prod = (unsigned int)peek_byte((p + i) & 0xFFFF) * m + carry;
-                poke_byte((p + i) & 0xFFFF, prod & 0xFF);
+                unsigned int prod = (unsigned int)peek_byte_no_time((p + i) & 0xFFFF) * m + carry;
+                poke_byte_no_time((p + i) & 0xFFFF, prod & 0xFF);
                 carry = prod >> 8;
         }
         if (carry) Z80_FLAGS |= FLAG_C; else Z80_FLAGS &= ~FLAG_C;
@@ -2997,19 +3004,20 @@ void instruccion_ed_206 ()
         z80_int cnt = 0;
         z80_int i;
         for (i = 0; i < nbits; i++) {
-                z80_byte b = peek_byte(bitmap + (i >> 3));
+                z80_byte b = peek_byte_no_time(bitmap + (i >> 3));
                 if (((b >> (i & 7)) & 1) == want) {
                         idxsum += i;
                         cnt++;
                 }
         }
-        poke_byte(out,     idxsum & 0xFF);
-        poke_byte(out + 1, (idxsum >> 8) & 0xFF);
-        poke_byte(out + 2, (idxsum >> 16) & 0xFF);
-        poke_byte(out + 3, (idxsum >> 24) & 0xFF);
-        poke_byte(out + 4, cnt & 0xFF);
-        poke_byte(out + 5, (cnt >> 8) & 0xFF);
-        t_estados += 4;
+        poke_byte_no_time(out,     idxsum & 0xFF);
+        poke_byte_no_time(out + 1, (idxsum >> 8) & 0xFF);
+        poke_byte_no_time(out + 2, (idxsum >> 16) & 0xFF);
+        poke_byte_no_time(out + 3, (idxsum >> 24) & 0xFF);
+        poke_byte_no_time(out + 4, cnt & 0xFF);
+        poke_byte_no_time(out + 5, (cnt >> 8) & 0xFF);
+        // RTL: 30 + 3*bytes T -- it scans a BYTE at a time (33@8b, 54@64b, 126@256b, 222@512b)
+        t_estados += 22 + 3 * (((unsigned int)nbits + 7) / 8);
 }
 
 void instruccion_ed_207 ()
