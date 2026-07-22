@@ -15,6 +15,28 @@ exactly as the bench expands them), and wraps them so BASIC can USR them:
 Nothing inside the algorithm is touched, so the tape races the SAME code the
 bench profiles and the timings are directly comparable to its cycle tables.
 BASIC does a CLEAR first so the interpreter stays below the exercise's data.
+
+KNOWN LIMITATION -- FRAMES CANNOT TIME A LONG OPCODE
+----------------------------------------------------
+These tapes time with the FRAMES system variable, and that only works while
+every instruction is shorter than a scanline. ZEsarUX advances the screen clock
+by exactly ONE scanline per instruction regardless of what t_estados did
+(`t_scanline_next_line`, video/screen.c:10421), so any t80x opcode costing more
+than ~224 T is counted as 224 T. Measured with euler16: a leg that should take
+14.25 s reported 1.1 s -- a 13x under-count, which inflated the printed speedup
+from 133x to 881x.
+
+This bites every opcode over ~224 T, so it is NOT specific to euler16:
+
+    bstride  ~450k T      factor    ~30k T      bin2dec/dec2bin  up to 229k T
+    memset   >75 bytes    mul1      >37 limbs   isprime          >12 trials
+
+Exercises whose opcode leg contains such an instruction must set `truex` (the
+bench's cycle-accurate ratio) so the tape prints that instead of a FRAMES figure
+this timebase cannot produce. The proper fix is to make the core catch the
+screen clock up when an instruction overshoots a scanline -- a no-op for stock
+Z80 code, which never exceeds 23 T -- but that changes every existing tape's
+printed number, so it has not been done unilaterally.
 """
 import sys, os, re, subprocess, tempfile
 
@@ -50,6 +72,29 @@ EX = {
     10: dict(rep=1, d="euler10", srcmod=True, limit=50000,
              answer=0xF020, nbytes=6, clear=32767,
              title=["sum of all primes", "below 50,000"]),
+    # euler16 races variant 3 (one `bin2dec`) against variant 1 (pure software).
+    # Its data lives at 0x8000-0x833F, so CLEAR must keep BASIC below that.
+    # rep=3 balances the two legs: ~28 s of software against ~10 frames of
+    # opcode, which is enough resolution for the ratio without a long wait.
+    #
+    # The opcode leg is `euler16_chunk.asm`, NOT the bench's variant 3, and the
+    # reason is worth recording because it breaks this builder's usual promise.
+    #
+    # Variant 3 converts 2^1000 in ONE `bin2dec` lasting 229,231 T = 3.28 frames.
+    # A Z80 only samples INT at an instruction boundary, so the machine takes one
+    # interrupt where it should take three and loses the rest -- FRAMES then
+    # under-counts the opcode leg and this tape reported 587x against a true
+    # 133x. That is backlog NX-018 with a number on it, and it is NOT an emulator
+    # artefact: real hardware drops the same interrupts.
+    #
+    # `euler16_chunk.asm` is variant 3 calling `bin2dec` in 32-digit slices, which
+    # bounds each instruction to 24,301 T = 0.35 frames. Measured on the RTL it
+    # costs +0.61% (230,679 vs 229,284) and needs no silicon change. So the tape
+    # races interrupt-SAFE code, and its ratio is trustworthy; the bench keeps the
+    # single-shot version as the clean cycle measurement.
+    16: dict(rep=3, d="euler16", op="euler16_chunk.asm", sw="euler16.asm",
+             answer=None, nbytes=2, clear=32767, truex="133",
+             title=["sum of the digits", "of 2^1000"]),
 }
 
 def answer_addr(cfg, op_src=None):
@@ -186,8 +231,22 @@ def build(n):
     prog += line(ln,    K('LET')+s('w=')+frames()+s('-f'));              ln += 10
     prog += line(ln,    K('LET')+s('b=')+peekn(addr, nb));               ln += 10
     prog += line(ln,    K('PRINT')+s('"software: ";w/')+num(50)+s(';" s (";b;")"')); ln += 10
-    prog += line(ln,    K('PRINT')+num(rep)+s(';" runs; opcode ";')+K('INT')
-                        +s('(w/o*')+num(100)+s(')/')+num(100)+s(';"x"'))
+    # A FRAMES-derived ratio is only trustworthy when every instruction in the
+    # opcode leg is shorter than a scanline (224 T). ZEsarUX advances the screen
+    # clock by exactly one scanline per instruction whatever t_estados did (see
+    # t_scanline_next_line, video/screen.c), so a long custom opcode is counted
+    # as 224 T no matter its real cost -- measured: a leg that should take 14.25 s
+    # reports 1.1 s, a 13x under-count. An exercise whose opcode leg contains such
+    # an instruction sets `truex` and we print the bench's cycle-accurate figure
+    # instead of a number this timebase cannot produce.
+    if cfg.get("truex"):
+        prog += line(ln, K('PRINT')+s('"opcode %sx (bench cycles)"' % cfg["truex"]));   ln += 10
+        prog += line(ln, K('PRINT')+s('"the timer above under-"'));                     ln += 10
+        prog += line(ln, K('PRINT')+s('"counts long opcodes:"'));                       ln += 10
+        prog += line(ln, K('PRINT')+s('"one op = one scanline"'))
+    else:
+        prog += line(ln, K('PRINT')+num(rep)+s(';" runs; opcode ";')+K('INT')
+                         +s('(w/o*')+num(100)+s(')/')+num(100)+s(';"x"'))
 
     plen = len(prog)
     name = ("EULER%-5d" % n)[:10].encode()

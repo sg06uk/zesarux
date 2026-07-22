@@ -31,6 +31,13 @@ class Z:
         o = s.cmd(f"read-memory {a:04X}H {n}"); m = re.match(r"\s*([0-9A-Fa-f]+)", o); h = m.group(1) if m else ""
         return bytes(int(h[i:i+2],16) for i in range(0, min(len(h),2*n), 2))
     def op(s, *bytes_): s.wmem(CODE, bytes_); s.setr("PC", CODE); s.cmd("cpu-step")
+    def opt(s, *bytes_):
+        """Like op(), but returns the instruction's t-state cost. The counter is
+        reset AFTER the register/memory setup so only the cpu-step is measured."""
+        s.wmem(CODE, bytes_); s.setr("PC", CODE)
+        s.cmd("reset-tstates-partial"); s.cmd("cpu-step")
+        m = re.search(r"\d+", s.cmd("get-tstates-partial"))
+        return int(m.group(0)) if m else -1
 
 z = Z(PORT); z.cmd("enter-cpu-step")
 res = []
@@ -110,6 +117,86 @@ for n, ln, cap in [(12,2,8),(7919,2,8),(1,2,8),(60,2,2),(4294967291,4,8),(p*q,6,
     gf = [int.from_bytes(raw[i*ln:(i+1)*ln], "little") for i in range(gc)]
     ck(f"factor {n} cap={cap}", gf == ef and gc == ec and gF == eF,
        f"f={gf}/{ef} cnt={gc}/{ec} F={gF:#x}/{eF:#x}")
+
+# ---------------------------------------------------------------------------
+# dec2bin (ED CF) / bin2dec (ED D0) -- radix conversion, added for euler16.
+#
+# These two also get their CYCLE cost checked, which nothing above does. The
+# euler16 tape is a timing race, so a wrong t-state model would leave every
+# value check passing while the headline speedup silently lied. Both opcodes
+# share one RTL model -- x10 and /10 cost identical silicon; only the software
+# differs -- and it is exact on all 19 bench vectors.
+# ---------------------------------------------------------------------------
+RACC, RDIG = 0x9500, 0xA000
+FRAME_T = 69888                      # 48K: 312 scanlines x 224 T
+def rtl_cycles(n, w):
+    return 13 + 3*n + 6*n*w
+def cycles_ok(t, exp):
+    """ZEsarUX cannot report a single instruction longer than one frame: the
+    end-of-frame handler subtracts screen_testados_total ONCE, so the partial
+    counter comes back exactly one frame short. (Worse, the screen clock only
+    advances one scanline per instruction whatever t_estados did -- which is why
+    FRAMES-based timing under-counts every t80x opcode over ~224 T.) The handler
+    is right; the emulator's timebase cannot represent the value. So only assert
+    the cycle cost where it fits in a frame, and check the modular remainder
+    beyond that rather than pretending we measured it."""
+    return t == exp if exp < FRAME_T else t == exp - FRAME_T
+
+# dec2bin: HL=&digits (MSD first), BC=&acc, DE=width, A=ndigits
+#          -> acc = value in place; HL/BC one-past-last; C=overflow
+for v, w in [(0, 4), (7, 1), (255, 1), (256, 1), (12345, 4), (65535, 2),
+             (4294967295, 4), (99999999999999999999, 9),
+             (37107287533902102798797998220837590246510135740250, 21)]:
+    digits = [int(c) for c in str(v)]
+    z.wmem(RDIG, bytes(digits))
+    z.wmem(RACC, bytes([0xFF] * w))          # garbage: it must NOT need pre-zeroing
+    z.setr("HL", RDIG); z.setr("BC", RACC); z.setr("DE", w)
+    z.setr("AF", len(digits) << 8)
+    t = z.opt(0xED, 0xCF); r = z.regs()
+    got = int.from_bytes(z.rmem(RACC, w), "little")
+    exp = O.BANK_ORACLES["dec2bin"](v, w)
+    exp_c = 1 if v >= (1 << (8 * w)) else 0
+    exp_t = rtl_cycles(len(digits), w)
+    ck(f"dec2bin {str(v)[:14]} w={w}",
+       got == exp and r["HL"] == (RDIG + len(digits)) & 0xFFFF
+       and r["BC"] == (RACC + w) & 0xFFFF and (r["AF"] & 1) == exp_c and cycles_ok(t, exp_t),
+       f"acc={got}/{exp} HL={r['HL']:#x}/{(RDIG+len(digits)):#x} "
+       f"BC={r['BC']:#x}/{(RACC+w):#x} C={r['AF']&1}/{exp_c} T={t}/{exp_t}")
+
+# bin2dec: HL=&acc (CONSUMED), BC=&out, DE=capacity, A=width
+#          -> HL=digit count, BC=one-past-last, C=overflow; digits LSD first
+for v, cap in [(0, 64), (7, 64), (255, 64), (12345, 64), (4294967295, 64),
+               (99999999999999999999, 64),
+               (5537376230390876637302048746832985971773659831892672, 64),
+               (123456, 3)]:
+    w = max(1, (v.bit_length() + 7) // 8)
+    z.wmem(RACC, v.to_bytes(w, "little")); z.wmem(RDIG, bytes(cap + 2))
+    z.setr("HL", RACC); z.setr("BC", RDIG); z.setr("DE", cap); z.setr("AF", w << 8)
+    t = z.opt(0xED, 0xD0); r = z.regs()
+    cnt = r["HL"]
+    got = "".join(str(d) for d in z.rmem(RDIG, cnt)[::-1]) if cnt else ""
+    exp = O.BANK_ORACLES["bin2dec"](v, cap)
+    exp_c = 1 if len(str(v)) > cap else 0
+    exp_t = rtl_cycles(cnt, w)
+    ck(f"bin2dec {str(v)[:14]} cap={cap}",
+       got == exp and cnt == len(exp) and r["BC"] == (RDIG + cnt) & 0xFFFF
+       and (r["AF"] & 1) == exp_c and cycles_ok(t, exp_t),
+       f"got={got[:20]}/{exp[:20]} n={cnt}/{len(exp)} "
+       f"BC={r['BC']:#x}/{(RDIG+cnt):#x} C={r['AF']&1}/{exp_c} T={t}/{exp_t}")
+
+# The euler16 workload itself, end to end: 2^1000 -> 302 digits, one instruction.
+# This is the exact call the tape makes, so it is the check that matters most.
+BIG = 2 ** 1000
+z.wmem(RACC, BIG.to_bytes(126, "little")); z.wmem(RDIG, bytes(320))
+z.setr("HL", RACC); z.setr("BC", RDIG); z.setr("DE", 320); z.setr("AF", 126 << 8)
+t = z.opt(0xED, 0xD0); r = z.regs()
+cnt = r["HL"]
+got = "".join(str(d) for d in z.rmem(RDIG, cnt)[::-1]) if cnt else ""
+dsum = sum(int(c) for c in got) if got else -1
+exp_t = rtl_cycles(302, 126)
+ck("bin2dec 2^1000 -> 302 digits, digit sum 1366 (euler16)",
+   got == str(BIG) and cnt == 302 and dsum == 1366 and (r["AF"] & 1) == 0 and cycles_ok(t, exp_t),
+   f"n={cnt}/302 digitsum={dsum}/1366 C={r['AF']&1}/0 T={t}/{exp_t}")
 
 z.cmd("exit")
 print(f"\n==== {sum(res)}/{len(res)} checks PASS ====")

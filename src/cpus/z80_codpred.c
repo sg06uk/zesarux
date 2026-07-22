@@ -3051,12 +3051,89 @@ void instruccion_ed_206 ()
 
 void instruccion_ed_207 ()
 {
-        invalid_opcode_ed("237 207");
+        // t80x ED CF: dec2bin -- HL=&digits (one digit per byte, value 0-9, MOST
+        // significant first), BC=&acc (little-endian), DE=width in bytes,
+        // A=ndigits. Folds the digit string into acc IN PLACE. The accumulator
+        // needs no pre-zeroing: the first pass reads it as zero. Out: HL and BC
+        // one-past-last (LDIR convention), C=1 if the value did not fit in DE
+        // bytes (sticky across passes -- the truncated value is v mod 2^(8*DE)).
+        z80_int dp = HL;
+        z80_int ap = BC;
+        z80_int w  = DE;
+        z80_byte nd = reg_a;
+        unsigned int ovf = 0, i, j;
+        z80_byte first = 1;
+        for (j = 0; j < nd; j++) {
+                // acc = acc*10 + digit. Seeding the pass carry WITH THE DIGIT is
+                // what makes byte 0 need no special case; max limb value is
+                // 255*10+255 = 2805, so the carry out stays <= 10.
+                unsigned int carry = peek_byte_no_time((dp + j) & 0xFFFF);
+                for (i = 0; i < w; i++) {
+                        unsigned int lb = first ? 0u
+                                : (unsigned int)peek_byte_no_time((ap + i) & 0xFFFF);
+                        unsigned int prod = lb * 10 + carry;
+                        poke_byte_no_time((ap + i) & 0xFFFF, prod & 0xFF);
+                        carry = prod >> 8;
+                }
+                if (carry) ovf = 1;
+                first = 0;
+        }
+        HL = (dp + nd) & 0xFFFF;
+        BC = (ap + w) & 0xFFFF;
+        if (ovf) Z80_FLAGS |= FLAG_C; else Z80_FLAGS &= ~FLAG_C;
+        // RTL: 13 + 3*ndigits + 6*ndigits*width T -- EXACT on all 10 bench vectors
+        // (69@1x1, 87@3x1, 195@5x4, 330@10x4, 1200@20x9, 6510@50x21) and on
+        // euler16's independent 302-digit/126-byte run. Minus the 8 already
+        // charged for the ED prefix + opcode fetch.
+        t_estados += 5 + 3u * (unsigned int)nd + 6u * (unsigned int)nd * (unsigned int)w;
 }
 
 void instruccion_ed_208 ()
 {
-        invalid_opcode_ed("237 208");
+        // t80x ED D0: bin2dec -- HL=&acc (little-endian, CONSUMED: divided down
+        // to zero in place), BC=&out (one digit per byte, LEAST significant
+        // first), DE=capacity in digits, A=width in bytes. Out: HL=digit count
+        // produced, BC=one-past-last output byte, C=1 if capacity ran out with
+        // digits still to emit. acc==0 emits exactly ONE digit, not none.
+        z80_int ap  = HL;
+        z80_int out = BC;
+        z80_int cap = DE;
+        z80_byte w  = reg_a;
+        z80_int count = 0;
+        z80_int o = out;
+        unsigned int ovf = 0;
+        if (w != 0) {
+                for (;;) {
+                        if ((z80_int)count >= cap) { ovf = 1; break; }
+                        // One pass = acc /= 10, walking MOST significant limb
+                        // first with the remainder carrying DOWN. rem < 10, so the
+                        // dividend is at most 9*256+255 = 2559 and the quotient
+                        // always fits a byte -- no wide divider is needed, only
+                        // division by the constant 10.
+                        unsigned int rem = 0, nz = 0;
+                        int i;
+                        for (i = (int)w - 1; i >= 0; i--) {
+                                unsigned int t = rem * 256u
+                                        + (unsigned int)peek_byte_no_time((ap + i) & 0xFFFF);
+                                unsigned int q = t / 10u;
+                                rem = t - q * 10u;
+                                poke_byte_no_time((ap + i) & 0xFFFF, q & 0xFF);
+                                if (q) nz = 1;
+                        }
+                        poke_byte_no_time(o, (z80_byte)rem);
+                        o = (o + 1) & 0xFFFF;
+                        count++;
+                        if (!nz) break;         // accumulator reached zero
+                }
+        }
+        HL = (z80_int)count;
+        BC = o;
+        if (ovf) Z80_FLAGS |= FLAG_C; else Z80_FLAGS &= ~FLAG_C;
+        // RTL: 13 + 3*digits + 6*digits*width T -- the SAME model as dec2bin
+        // (x10 and /10 cost the identical silicon; only the software differs).
+        // EXACT on all 9 bench vectors (85@1x1, 151@5x2, 346@10x4, 1216@20x9,
+        // 7096@52x22) and on euler16's 302-digit/126-byte run.
+        t_estados += 5 + 3u * (unsigned int)count + 6u * (unsigned int)count * (unsigned int)w;
 }
 
 void instruccion_ed_209 ()
