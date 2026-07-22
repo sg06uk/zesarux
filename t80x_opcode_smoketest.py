@@ -132,15 +132,18 @@ FRAME_T = 69888                      # 48K: 312 scanlines x 224 T
 def rtl_cycles(n, w):
     return 13 + 3*n + 6*n*w
 def cycles_ok(t, exp):
-    """ZEsarUX cannot report a single instruction longer than one frame: the
-    end-of-frame handler subtracts screen_testados_total ONCE, so the partial
-    counter comes back exactly one frame short. (Worse, the screen clock only
-    advances one scanline per instruction whatever t_estados did -- which is why
-    FRAMES-based timing under-counts every t80x opcode over ~224 T.) The handler
-    is right; the emulator's timebase cannot represent the value. So only assert
-    the cycle cost where it fits in a frame, and check the modular remainder
-    beyond that rather than pretending we measured it."""
-    return t == exp if exp < FRAME_T else t == exp - FRAME_T
+    """t_estados wraps by one whole frame (screen_testados_total) at every frame
+    boundary an instruction crosses, so get-tstates-partial can never report the
+    absolute cost of an instruction longer than a frame -- it comes back short by
+    however many frames were crossed. Since the core's scanline catch-up fix
+    (core_spectrum.c: the fin_scanline loop is now a while, not an if) the screen
+    clock wraps ONCE PER crossed frame instead of once total, so the amount
+    subtracted now depends on the start phase within the frame -- e.g. the 2^1000
+    bin2dec (229,231 T = 3.28 frames) comes back as exp - 3*FRAME_T, where before
+    the fix it always came back as exp - 1*FRAME_T. The phase-independent invariant
+    that survives both is the residue modulo a frame, so that is what we assert;
+    for anything shorter than a frame it degenerates to plain equality."""
+    return t % FRAME_T == exp % FRAME_T
 
 # dec2bin: HL=&digits (MSD first), BC=&acc, DE=width, A=ndigits
 #          -> acc = value in place; HL/BC one-past-last; C=overflow

@@ -18,25 +18,31 @@ BASIC does a CLEAR first so the interpreter stays below the exercise's data.
 
 KNOWN LIMITATION -- FRAMES CANNOT TIME A LONG OPCODE
 ----------------------------------------------------
-These tapes time with the FRAMES system variable, and that only works while
-every instruction is shorter than a scanline. ZEsarUX advances the screen clock
-by exactly ONE scanline per instruction regardless of what t_estados did
-(`t_scanline_next_line`, video/screen.c:10421), so any t80x opcode costing more
-than ~224 T is counted as 224 T. Measured with euler16: a leg that should take
-14.25 s reported 1.1 s -- a 13x under-count, which inflated the printed speedup
-from 133x to 881x.
+These tapes time with the FRAMES system variable, which counts the 50 Hz
+maskable interrupt. A wide t80x opcode breaks that: a Z80 only samples INT at an
+instruction boundary, so an opcode longer than the interrupt period (or a chain
+of them) makes the CPU miss interrupts it should have taken, and FRAMES counts
+fewer than really elapsed. This is backlog NX-018, and it is NOT an emulator
+artefact -- real hardware drops exactly the same interrupts. Measured on the
+shipped euler16 tape: the opcode leg reads 0.04 s (true cost ~0.27 s by cycles),
+inflating the printed speedup from 133x to 881x.
 
-This bites every opcode over ~224 T, so it is NOT specific to euler16:
+This bites every opcode wide enough to straddle the interrupt period, so it is
+NOT specific to euler16:
 
     bstride  ~450k T      factor    ~30k T      bin2dec/dec2bin  up to 229k T
     memset   >75 bytes    mul1      >37 limbs   isprime          >12 trials
 
-Exercises whose opcode leg contains such an instruction must set `truex` (the
-bench's cycle-accurate ratio) so the tape prints that instead of a FRAMES figure
-this timebase cannot produce. The proper fix is to make the core catch the
-screen clock up when an instruction overshoots a scanline -- a no-op for stock
-Z80 code, which never exceeds 23 T -- but that changes every existing tape's
-printed number, so it has not been done unilaterally.
+Exercises whose opcode leg contains such an instruction set `truex` (the bench's
+cycle-accurate ratio) so the tape prints that instead of a FRAMES figure this
+timebase cannot produce.
+
+Do NOT confuse this with the separate scanline-clock bug (core_spectrum.c
+cpu_core_loop was `if`, now `while`), which made the SCREEN clock advance only
+one scanline per instruction. That fix, 2026-07-22, corrected rendering and
+get-tstates-partial for wide opcodes but left this FRAMES number unchanged (the
+tape still reads 881x) -- proving the under-count is interrupt-driven, not
+scanline-driven. `truex` stays necessary regardless.
 """
 import sys, os, re, subprocess, tempfile
 
@@ -231,13 +237,12 @@ def build(n):
     prog += line(ln,    K('LET')+s('w=')+frames()+s('-f'));              ln += 10
     prog += line(ln,    K('LET')+s('b=')+peekn(addr, nb));               ln += 10
     prog += line(ln,    K('PRINT')+s('"software: ";w/')+num(50)+s(';" s (";b;")"')); ln += 10
-    # A FRAMES-derived ratio is only trustworthy when every instruction in the
-    # opcode leg is shorter than a scanline (224 T). ZEsarUX advances the screen
-    # clock by exactly one scanline per instruction whatever t_estados did (see
-    # t_scanline_next_line, video/screen.c), so a long custom opcode is counted
-    # as 224 T no matter its real cost -- measured: a leg that should take 14.25 s
-    # reports 1.1 s, a 13x under-count. An exercise whose opcode leg contains such
-    # an instruction sets `truex` and we print the bench's cycle-accurate figure
+    # A FRAMES-derived ratio is only trustworthy when the opcode leg takes an
+    # interrupt every frame like ordinary code does. A wide t80x opcode is longer
+    # than the interrupt period, so the CPU -- which samples INT only at an
+    # instruction boundary -- misses interrupts and FRAMES under-counts (NX-018;
+    # real hardware drops them too). An exercise whose opcode leg contains such an
+    # instruction sets `truex` and we print the bench's cycle-accurate figure
     # instead of a number this timebase cannot produce.
     if cfg.get("truex"):
         prog += line(ln, K('PRINT')+s('"opcode %sx (bench cycles)"' % cfg["truex"]));   ln += 10

@@ -1130,8 +1130,18 @@ void cpu_core_loop_spectrum(void)
     }
 
 
-    //A final de cada scanline
-    if ( (t_estados/screen_testados_linea)>t_scanline  ) {
+    //A final de cada scanline.
+    //WHILE, no IF: la instruccion anterior puede haber cruzado VARIAS scanlines de
+    //golpe. Un Z80 de serie nunca pasa de 23 T (< 224 T/scanline), asi que aqui
+    //siempre se entra 0 o 1 vez y el comportamiento es identico a un if -- pero un
+    //opcode t80x ancho (bin2dec/bstride/...) avanza t_estados miles de T en una sola
+    //instruccion, y con un if el reloj de pantalla solo subia UNA scanline por
+    //instruccion. Eso hacia que FRAMES contase de menos (bench NX: hasta 13x) y que
+    //get-tstates-partial volviera exactamente un frame corto. Con while el reloj de
+    //pantalla alcanza al de CPU: cada scanline cruzada dispara su fin_scanline (y su
+    //fin de frame, que resta screen_testados_total y pone t_scanline=0), asi que el
+    //bucle termina en cuanto (t_estados/screen_testados_linea) <= t_scanline.
+    while ( (t_estados/screen_testados_linea)>t_scanline  ) {
         TIMESENSOR_ENTRY_PRE(TIMESENSOR_ID_core_spectrum_fin_scanline);
         core_spectrum_fin_scanline();
         TIMESENSOR_ENTRY_POST(TIMESENSOR_ID_core_spectrum_fin_scanline);
