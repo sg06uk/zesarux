@@ -3138,12 +3138,60 @@ void instruccion_ed_208 ()
 
 void instruccion_ed_209 ()
 {
-        invalid_opcode_ed("237 209");
+        // t80x ED D1: mpn_add_n -- HL=&dst, DE=&src, BC=width in bytes. Add the
+        // little-endian src[width] INTO dst[width] in place (GMP's mpn_add_n);
+        // C=1 on carry out of the top byte. HL is left one-past-last (LDIR/mul1
+        // convention); DE, BC and A are preserved. It is mul1's shape with a
+        // second read pointer -- three memory M-cycles a byte (read dst, read
+        // src, write dst) where the Z80's adc loop needs a load, an add, a store
+        // and two pointer bumps plus the loop control.
+        z80_int dp = HL;
+        z80_int sp = DE;
+        z80_int w  = BC;
+        unsigned int carry = 0, i;
+        for (i = 0; i < w; i++) {
+                unsigned int s = (unsigned int)peek_byte_no_time((dp + i) & 0xFFFF)
+                               + (unsigned int)peek_byte_no_time((sp + i) & 0xFFFF)
+                               + carry;
+                poke_byte_no_time((dp + i) & 0xFFFF, s & 0xFF);
+                carry = s >> 8;
+        }
+        HL = (dp + w) & 0xFFFF;   // one-past-last, like mul1
+        if (carry) Z80_FLAGS |= FLAG_C; else Z80_FLAGS &= ~FLAG_C;
+        // RTL: 12 + 9*width T (3 mem M-cycles/byte). Measured EXACT on GHDL at
+        // w=1/8/64 -> 21/84/588 T. Minus the 8 already charged for the ED prefix
+        // + opcode fetch.
+        t_estados += 4 + 9u * (unsigned int)w;
 }
 
 void instruccion_ed_210 ()
 {
-        invalid_opcode_ed("237 210");
+        // t80x ED D2: bcd_add_n -- the DECIMAL twin of mpn_add_n. HL=&dst, DE=&src,
+        // BC=width in bytes, each byte PACKED BCD (two decimal digits 00-99). Add
+        // src[width] into dst[width] in place with decimal carry propagation;
+        // C=1 on carry out of the top byte. HL = one-past-last; DE, BC, A preserved.
+        // Same 12+9*width T cost as mpn_add_n -- the decimal adjust is combinational
+        // in the RTL -- which is what lets a BCD-vs-binary race isolate density.
+        z80_int dp = HL;
+        z80_int sp = DE;
+        z80_int w  = BC;
+        unsigned int carry = 0, i;
+        for (i = 0; i < w; i++) {
+                z80_byte d = peek_byte_no_time((dp + i) & 0xFFFF);
+                z80_byte s = peek_byte_no_time((sp + i) & 0xFFFF);
+                unsigned int lo = (d & 0x0F) + (s & 0x0F) + carry;   // 0..19
+                unsigned int loc = (lo >= 10) ? 1u : 0u;
+                if (loc) lo -= 10;
+                unsigned int hi = (d >> 4) + (s >> 4) + loc;          // 0..19
+                carry = (hi >= 10) ? 1u : 0u;
+                if (carry) hi -= 10;
+                poke_byte_no_time((dp + i) & 0xFFFF, (z80_byte)((hi << 4) | lo));
+        }
+        HL = (dp + w) & 0xFFFF;   // one-past-last, like mpn_add_n
+        if (carry) Z80_FLAGS |= FLAG_C; else Z80_FLAGS &= ~FLAG_C;
+        // RTL: 12 + 9*width T (identical to mpn_add_n). Minus the 8 already charged
+        // for the ED prefix + opcode fetch.
+        t_estados += 4 + 9u * (unsigned int)w;
 }
 
 void instruccion_ed_211 ()
