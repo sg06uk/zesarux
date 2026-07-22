@@ -101,6 +101,26 @@ EX = {
     16: dict(rep=3, d="euler16", op="euler16_chunk.asm", sw="euler16.asm",
              answer=None, nbytes=2, clear=32767, truex="133",
              title=["sum of the digits", "of 2^1000"]),
+    # euler25 races variant 3 (`mpn_add_n`) against variant 1 (pure software) --
+    # ~4,780 wide adds of a value growing to 415 bytes. Its `; @@KDATA@@` slot is
+    # filled with 10^999 (the 1000-digit threshold) via profile.py's kdata(),
+    # exactly like euler8's digit table.
+    #
+    # `truex` IS needed, and the reason corrects a tempting mis-analysis. The
+    # threshold for the FRAMES under-count is NOT the frame period (69,888 T) --
+    # it is the maskable interrupt PULSE WIDTH (~32 T). The Z80 samples INT only
+    # at an instruction boundary, so any instruction much longer than the pulse
+    # can be executing across the whole pulse and miss it. The widest `mpn_add_n`
+    # is 12+9*415 = 3,747 T >> 32 T, and the opcode leg is ~99% `mpn_add_n` by
+    # cycles, so most interrupt pulses land mid-opcode and are lost: measured, the
+    # tape reads the opcode leg as 0.4 s (true ~2.9 s), inflating 4.91x to ~43x.
+    # This is NX-018 and it is faithful to hardware -- a real Spectrum drops the
+    # same interrupts. So we print the bench's cycle-accurate 4.9x, like euler16.
+    # (The comparison that matters is opcode-vs-pulse, not opcode-vs-frame.)
+    25: dict(rep=1, d="euler25", op="euler25_op.asm", sw="euler25.asm",
+             fixups=[("; @@KDATA@@", "kdata")],
+             answer=None, nbytes=2, clear=32767, truex="4.9",
+             title=["first Fibonacci with", "1000 digits"]),
 }
 
 def answer_addr(cfg, op_src=None):
@@ -238,17 +258,20 @@ def build(n):
     prog += line(ln,    K('LET')+s('b=')+peekn(addr, nb));               ln += 10
     prog += line(ln,    K('PRINT')+s('"software: ";w/')+num(50)+s(';" s (";b;")"')); ln += 10
     # A FRAMES-derived ratio is only trustworthy when the opcode leg takes an
-    # interrupt every frame like ordinary code does. A wide t80x opcode is longer
-    # than the interrupt period, so the CPU -- which samples INT only at an
-    # instruction boundary -- misses interrupts and FRAMES under-counts (NX-018;
-    # real hardware drops them too). An exercise whose opcode leg contains such an
-    # instruction sets `truex` and we print the bench's cycle-accurate figure
-    # instead of a number this timebase cannot produce.
+    # interrupt every frame like ordinary code does. The maskable INT is asserted
+    # for only a short PULSE (~32 T); the Z80 samples INT at an instruction
+    # boundary, so any opcode much longer than that pulse can execute clean across
+    # it and miss it (NX-018; real hardware drops the same interrupts). The
+    # threshold is opcode-vs-PULSE, NOT opcode-vs-frame: bin2dec (229k T) exceeds
+    # a whole frame, but even mpn_add_n (up to 3,747 T, well under a frame) loses
+    # most interrupts because 3,747 T >> 32 T. An exercise whose opcode leg
+    # contains such an instruction sets `truex` and we print the bench's cycle-
+    # accurate figure instead of a number this timebase cannot produce.
     if cfg.get("truex"):
         prog += line(ln, K('PRINT')+s('"opcode %sx (bench cycles)"' % cfg["truex"]));   ln += 10
         prog += line(ln, K('PRINT')+s('"the timer above under-"'));                     ln += 10
-        prog += line(ln, K('PRINT')+s('"counts long opcodes:"'));                       ln += 10
-        prog += line(ln, K('PRINT')+s('"one op = one scanline"'))
+        prog += line(ln, K('PRINT')+s('"counts: a wide opcode"'));                       ln += 10
+        prog += line(ln, K('PRINT')+s('"misses the 50Hz int"'))
     else:
         prog += line(ln, K('PRINT')+num(rep)+s(';" runs; opcode ";')+K('INT')
                          +s('(w/o*')+num(100)+s(')/')+num(100)+s(';"x"'))
